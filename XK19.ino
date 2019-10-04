@@ -1,10 +1,10 @@
-//#include <WiFi.h>
 #include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <xCore.h>
 #include <xSW01.h>
 #include <xOD01.h>
+#include <xOC03.h>
 #include <ArduinoJson.h>    // https://github.com/bblanchon/ArduinoJson
 #include <xProvision.h>     // https://github.com/xinabox/arduino-Provision    
 #include <ATT_IOT.h>
@@ -14,6 +14,7 @@
 struct sensor_acks {
   uint8_t SW01_ACK;
   uint8_t OD01_ACK;
+  uint8_t OC03_ACK;
 };
 struct sensor_acks c;
 
@@ -45,6 +46,8 @@ unsigned long prevTime;
 unsigned int prevVal = 0;
 
 float tempC, pres, hum;
+float dew, alt, cloudBase;
+long rssi;
 
 // Callback functions MQTT
 void callback(char* topic, byte* payload, unsigned int length);
@@ -57,9 +60,10 @@ HTTPClient http;
 PubSubClient pubSub(MQTT, 1883, callback, espClient);
 ATTDevice device(DEVICE_ID, TOKEN);
 
-//Sensors
+//Sensors and actuators
 xSW01 SW01;
 xOD01 OD01;
+xOC03 OC03;
 
 void setup()
 {
@@ -76,81 +80,79 @@ void setup()
     OD01.println("Provisioning your device...");
   }
 
-  //prv.begin();
-  //prv.addWiFi();
-  //prv.addVariable("DEVICE_ID", "ATT_DEVICE_ID");
-  //prv.addVariable("TOKEN", "ATT_TOKEN");
-  //prv.transmit();
-  //prv.receive();
-  //if (prv.success())
-  //{
-  prv.getWiFi(ssid, password);
-  if (!password)password = "";
-  prv.getVariable("DEVICE_ID", DEVICE_ID);
-  prv.getVariable("TOKEN", TOKEN);
-
-  if (c.OD01_ACK == 0xFF)
+  prv.begin();
+  prv.addWiFi();
+  prv.addVariable("DEVICE_ID", "ATT_DEVICE_ID");
+  prv.addVariable("TOKEN", "ATT_TOKEN");
+  prv.transmit();
+  prv.receive();
+  if (prv.success())
   {
-    OD01.clear();
-    OD01.println("Connecting to Wi-Fi");
-    OD01.println("please wait...");
-  }
-  // Enter your WiFi credentials here!
-  setupWiFi("INTERACTIVE-BRAINS3", "AllahMohammad110");
+    prv.getWiFi(ssid, password);
+    if (!password)password = "";
+    prv.getVariable("DEVICE_ID", DEVICE_ID);
+    prv.getVariable("TOKEN", TOKEN);
 
-  //mac = WiFi.macAddress();
-  
-  if (WiFiconnect)
-  {
-    unsigned int count = 0;
-    device.setCredentials("NdWuTXiFTgRvwM9uGFMgbVp5", "maker:4TzyYyQ8QN8T40ByXzeyGiW7gqciDts06OwWZbT4");
-    //Serial.println("NdWuTXiFTgRvwM9uGFMgbVp5", "maker:4TzyYyQ8QN8T40ByXzeyGiW7gqciDts06OwWZbT4");
-    while (!device.connect(&espClient, HTTP))  // Connect to AllThingsTalk
+    if (c.OD01_ACK == 0xFF)
     {
-      Serial.println("retrying");
-      delay(100);
-      count++;
-      if (count > 100)
-      {
-        ATTconnect = false;
-        count = 0;
-        Serial.println("Incorrect device credentials!");
+      OD01.clear();
+      OD01.println("Connecting to Wi-Fi");
+      OD01.println("please wait...");
+    }
+    // Enter your WiFi credentials here!
+    setupWiFi(ssid.c_str(), password.c_str());
 
-        if (c.OD01_ACK == 0xFF) {
-          OD01.clear();
-          OD01.println("Incorrect cred.");
-          delay(3000);
+    mac = WiFi.macAddress();
+
+    if (WiFiconnect)
+    {
+      unsigned int count = 0;
+      device.setCredentials(DEVICE_ID, TOKEN);
+      while (!device.connect(&espClient, HTTP))  // Connect to AllThingsTalk
+      {
+        Serial.println("retrying");
+        delay(100);
+        count++;
+        if (count > 100)
+        {
+          ATTconnect = false;
+          count = 0;
+          Serial.println("Incorrect device credentials!");
+
+          if (c.OD01_ACK == 0xFF) {
+            OD01.clear();
+            OD01.println("Incorrect cred.");
+            delay(3000);
+          }
+          break;
         }
-        break;
       }
     }
-  }
 
-  if (c.OD01_ACK == 0xFF)
-  {
-    OD01.clear();
-    OD01.println("XinaBox XK19");
-    OD01.println("Loading please wait...");
-  }
-
-  if (ATTconnect)
-  {
-    createATTAssets();
-  }
-
-  if (ATTconnect)
-    while (!device.subscribe(pubSub))  // Subscribe to mqtt
+    if (c.OD01_ACK == 0xFF)
     {
-      Serial.println("subscribing");
-      delay(100);
+      OD01.clear();
+      OD01.println("XinaBox XK19");
+      OD01.println("Loading please wait...");
     }
-  /*} else {
+
+    if (ATTconnect)
+    {
+      createATTAssets();
+    }
+
+    if (ATTconnect)
+      while (!device.subscribe(pubSub))  // Subscribe to mqtt
+      {
+        Serial.println("subscribing");
+        delay(100);
+      }
+  } else {
     if (c.OD01_ACK) {
       OD01.println("Provisioning failed...");
     }
     prv.fail();
-    }*/
-  //wifi_set_sleep_type(MODEM_SLEEP_T);
+  }
 
   if (c.OD01_ACK) {
     OD01.clear();
@@ -162,6 +164,9 @@ void loop()
   unsigned int Month;
   boolean hemi;
 
+  //Wi-Fi signal strength
+  rssi = WiFi.RSSI();
+
   //Get SW01 measures
   if (c.SW01_ACK)
   {
@@ -169,10 +174,16 @@ void loop()
     tempC = SW01.getTempC();
     pres = SW01.getPressure();
     hum = SW01.getHumidity();
+    alt = SW01.getQNE();
+    dew = SW01.getDewPoint();
+    cloudBase = (((tempC - dew) / 2.5) * 1000) * 0.3048 + alt;
   } else {
     tempC = random(100);
     pres = random(100);
     hum = random(100);
+    alt = random(100);
+    dew = random(100);
+    cloudBase = random(100);
   }
 
   //Get thermal zone
@@ -181,6 +192,15 @@ void loop()
     thermal_zone = onlineZones(tempC, hum, hemi, Month);
   } else {
     thermal_zone = offlineZones(tempC, hum);
+  }
+
+  if (c.OC03_ACK == 0xFF)
+  {
+    if (thermal_zone != "comfort zone") {
+      OC03.write(HIGH);
+    } else if (thermal_zone == "comfort zone") {
+      OC03.write(LOW);
+    }
   }
 
   unsigned long curTime = millis();
@@ -220,14 +240,17 @@ void loop()
 
 
 /*
-   User define functions
-
+  *************************************************************************
+  *************************************************************************
+   User defines functions
+  *************************************************************************
+  *************************************************************************
 */
 
 
 
 void callback(char* topic, byte* payload, unsigned int length)
-{
+{ 
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
@@ -350,9 +373,16 @@ boolean getLocation()
 void createATTAssets()
 {
   // Create device assets
-  device.addAsset("temperature", "Temperature", "", "sensor", "{\"type\": \"number\"}");
-  device.addAsset("pressure", "Pressure", "", "sensor", "{\"type\": \"number\"}");
-  device.addAsset("humidity", "Humidity", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("2", "Temperature", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("3", "Pressure", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("4", "Humidity", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("5", "RSSI", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("6", "MAC", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("4", "Humidity", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("7", "OLED", "", "actuator", "{\"type\": \"string\"}");
+  device.addAsset("9", "Altitude", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("8", "Dew point", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("10", "Cloud base", "", "sensor", "{\"type\": \"number\"}");
   device.addAsset("city", "City", "", "sensor", "{\"type\": \"string\"}");
   device.addAsset("country", "Country", "", "sensor", "{\"type\": \"string\"}");
   device.addAsset("latitude", "Latitude", "", "sensor", "{\"type\": \"string\"}");
@@ -362,17 +392,28 @@ void createATTAssets()
 
 void START_XCHIPS(void)
 {
+  //OD01
   if ( xCore.ping(0x3C)) {  // if you can ping sensor set ack
     c.OD01_ACK = 0xFF;
     OD01.begin();
   } else {        // don't set
     c.OD01_ACK = 0;
   }
+
+  //SW01
   if ( xCore.ping(0x76)) {  // if you can ping sensor set ack
     c.SW01_ACK = 0xFF;
     SW01.begin();
   } else {        // don't set
     c.SW01_ACK = 0;
+  }
+
+  //OC03
+  if ( xCore.ping(0x38)) {  // if you can ping sensor set ack
+    c.OC03_ACK = 0xFF;
+    OC03.begin();
+  } else {        // don't set
+    c.OC03_ACK = 0;
   }
 
 }
@@ -422,9 +463,14 @@ boolean setupWiFi(const char* ssid , const char* password)
 
 void sendDatatoATT()
 {
-  device.send(String(tempC), "temperature");
-  device.send(String(pres), "pressure");
-  device.send(String(hum), "humidity");
+  device.send(String(alt), "9");
+  device.send(String(tempC), "2");
+  device.send(String(pres), "3");
+  device.send(String(hum), "4");
+  device.send(String(rssi), "5");
+  device.send(mac, "6");
+  device.send(String(dew), "8");
+  device.send(String(cloudBase), "10");
   device.send(city, "city");
   device.send(country, "country");
   device.send(lat, "latitude");
@@ -434,11 +480,12 @@ void sendDatatoATT()
 
 void displayOnOD01()
 {
+  OD01.clear();
   OD01.home();
-  OD01.println("Temp/Hum.");
-  OD01.print(tempC); OD01.print("/"); OD01.println(hum);
-  OD01.println("City/Country");
-  OD01.print(city); OD01.print("/"); OD01.println(country);
+  OD01.println("Temp.(C) / RH(%)");
+  OD01.print(tempC); OD01.print(" / "); OD01.println(hum);
+  OD01.println("City / Country");
+  OD01.print(city); OD01.print(" / "); OD01.println(country);
   OD01.println("Thermal zone");
   OD01.println(thermal_zone);
 }
