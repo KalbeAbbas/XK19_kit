@@ -28,37 +28,47 @@ String DEVICE_ID = "";
 String ssid = "";
 String password = "";
 String mac = "";
-long rssi;
-String payload;
+boolean WiFiconnect = true;
+boolean ATTconnect = true;
+boolean Dateget = true;
+boolean Locget = true;
 
-const char* lat;
-const char* lon;
+String lat;
+String lon;
+String country;
+String city;
+String Date;
+String Time;
+String thermal_zone;
 
 unsigned long prevTime;
 unsigned int prevVal = 0;
 
+float tempC, pres, hum;
+
 // Callback functions MQTT
 void callback(char* topic, byte* payload, unsigned int length);
-// Constuctors
+
+//Web clients
 WiFiClient espClient;
 HTTPClient http;
-/*PubSubClient pubSub(mqtt, 1883, callback, espClient);
-  ATTDevice device(DEVICE_ID, TOKEN);*/
+
+// Constuctors
+PubSubClient pubSub(MQTT, 1883, callback, espClient);
+ATTDevice device(DEVICE_ID, TOKEN);
+
+//Sensors
 xSW01 SW01;
 xOD01 OD01;
-//void callback(char* topic, byte* payload, unsigned int length);
+
 void setup()
 {
   Serial.begin(115200);  // Init serial link for debugging
+
   // Start the I2C Comunication
-
-  // Set the I2C Pins for CW01
-#ifdef ESP8266
-  Wire.pins(2, 14);
-  Wire.setClockStretchLimit(15000);
-#endif
-
   Wire.begin(); // no need to input pins included in board file
+
+  //Start xchips
   START_XCHIPS();
 
   if (c.OD01_ACK == 0xFF)
@@ -78,6 +88,7 @@ void setup()
   if (!password)password = "";
   prv.getVariable("DEVICE_ID", DEVICE_ID);
   prv.getVariable("TOKEN", TOKEN);
+
   if (c.OD01_ACK == 0xFF)
   {
     OD01.clear();
@@ -87,44 +98,52 @@ void setup()
   // Enter your WiFi credentials here!
   setupWiFi("INTERACTIVE-BRAINS3", "AllahMohammad110");
 
-  //Get Latittude and Longitude
-  getLocation();
-
-
-  /*system_phy_set_max_tpw(10); // set transmit power to 10 (min:1 , max:23
-    mac = WiFi.macAddress();
-    device.setCredentials(DEVICE_ID, TOKEN);
-    //Serial.println(DEVICE_ID, TOKEN);
-    while (!device.connect(&espClient, http))  // Connect to AllThingsTalk
+  //mac = WiFi.macAddress();
+  
+  if (WiFiconnect)
+  {
+    unsigned int count = 0;
+    device.setCredentials("NdWuTXiFTgRvwM9uGFMgbVp5", "maker:4TzyYyQ8QN8T40ByXzeyGiW7gqciDts06OwWZbT4");
+    //Serial.println("NdWuTXiFTgRvwM9uGFMgbVp5", "maker:4TzyYyQ8QN8T40ByXzeyGiW7gqciDts06OwWZbT4");
+    while (!device.connect(&espClient, HTTP))  // Connect to AllThingsTalk
     {
-    Serial.println("retrying");
-    delay(100);
+      Serial.println("retrying");
+      delay(100);
+      count++;
+      if (count > 100)
+      {
+        ATTconnect = false;
+        count = 0;
+        Serial.println("Incorrect device credentials!");
+
+        if (c.OD01_ACK == 0xFF) {
+          OD01.clear();
+          OD01.println("Incorrect cred.");
+          delay(3000);
+        }
+        break;
+      }
     }
+  }
 
-    if (c.OD01_ACK == 0xFF)
-    {
+  if (c.OD01_ACK == 0xFF)
+  {
     OD01.clear();
-    OD01.println("Weather Station");
+    OD01.println("XinaBox XK19");
     OD01.println("Loading please wait...");
-    }
-    // Create device assets
-    device.addAsset("1", "Temperature", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("2", "Pressure", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("3", "Humidity", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("4", "Lux", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("5", "UVA", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("6", "UVB", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("7", "RSSI", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("8", "MAC", "", "sensor", "{\"type\": \"string\"}");
-    device.addAsset("9", "OLED", "", "actuator", "{\"type\": \"string\"}");
-    device.addAsset("10", "Altitude", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("11", "Dew point", "", "sensor", "{\"type\": \"number\"}");
-    device.addAsset("12", "Cloud base", "", "sensor", "{\"type\": \"number\"}");
+  }
+
+  if (ATTconnect)
+  {
+    createATTAssets();
+  }
+
+  if (ATTconnect)
     while (!device.subscribe(pubSub))  // Subscribe to mqtt
     {
-    Serial.println("retrying");
-    delay(100);
-    }*/
+      Serial.println("subscribing");
+      delay(100);
+    }
   /*} else {
     if (c.OD01_ACK) {
       OD01.println("Provisioning failed...");
@@ -132,10 +151,215 @@ void setup()
     prv.fail();
     }*/
   //wifi_set_sleep_type(MODEM_SLEEP_T);
+
   if (c.OD01_ACK) {
     OD01.clear();
   }
 }
+
+void loop()
+{
+  unsigned int Month;
+  boolean hemi;
+
+  //Get SW01 measures
+  if (c.SW01_ACK)
+  {
+    SW01.poll();
+    tempC = SW01.getTempC();
+    pres = SW01.getPressure();
+    hum = SW01.getHumidity();
+  } else {
+    tempC = random(100);
+    pres = random(100);
+    hum = random(100);
+  }
+
+  //Get thermal zone
+  if (Dateget && Locget)
+  {
+    thermal_zone = onlineZones(tempC, hum, hemi, Month);
+  } else {
+    thermal_zone = offlineZones(tempC, hum);
+  }
+
+  unsigned long curTime = millis();
+  if (curTime > (prevTime + 5000))
+  {
+    // lower TX power may need to check if we are connected
+    // will skip if already connected
+    if (WiFi.status() != WL_CONNECTED) setupWiFi(ssid.c_str(), password.c_str());
+
+    //Get Latittude, Longitude, Country and city
+    getLocation();
+
+    //Get Date and time
+    getDateTime();
+
+    Month = (Date.substring(5, 7)).toInt();
+
+    if (lat.toInt() > 0)
+    {
+      hemi = true;
+    } else {
+      hemi = false;
+    }
+
+    if (ATTconnect)
+    {
+      sendDatatoATT();
+    }
+    if (c.OD01_ACK == 0xFF) {
+      displayOnOD01();
+    }
+    prevTime = curTime;
+  }
+  device.process();
+}
+
+
+
+/*
+   User define functions
+
+*/
+
+
+
+void callback(char* topic, byte* payload, unsigned int length)
+{
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  // Convert payload to json
+  StaticJsonBuffer<500> jsonBuffer;
+  char json[500];
+  for (int i = 0; i < length; i++) {
+    json[i] = (char)payload[i];
+  }
+  json[length] = '\0';
+  JsonObject& root = jsonBuffer.parseObject(json);
+  // Do something
+  if (root.success())
+  {
+    const char* value = root["value"];
+    if (c.OD01_ACK == 0xFF) {
+      OD01.clear();
+      OD01.println(value);
+    }
+    device.send(value, "toggle");  // Send command back as ACK using JSON
+    delay(2000);
+  }
+  else
+    Serial.println("Parsing JSON failed");
+}
+
+boolean getDateTime()
+{
+  String payload;
+  const char* datetime;
+  String datetimeStr;
+
+  //Fetch time and approx. location
+  http.begin("http://worldtimeapi.org/api/ip");
+
+  if (http.GET())
+  {
+    payload = http.getString();
+    Serial.println("Response");
+    Serial.println(payload);
+  } else {
+    Serial.println("Error on request");
+    Dateget = false;
+  }
+
+  http.end();
+
+  int n = payload.length();
+
+  // declaring character array
+  char json[n + 1];
+
+  // copying the contents of the
+  // string to char array
+  strcpy(json, payload.c_str());
+
+
+  StaticJsonBuffer<600> jsonBuffer;
+  JsonObject& object = jsonBuffer.parseObject(json);
+  datetime = object["datetime"];
+
+  datetimeStr = String(datetime);
+
+  Date = datetimeStr.substring(0, 10);
+  Time = datetimeStr.substring(11, 19);
+
+  return false;
+}
+
+boolean getLocation()
+{
+  String payload;
+  const char * latChr;
+  const char * lonChr;
+  const char * countryChr;
+  const char * cityChr;
+
+
+  //Fetch time and approx. location
+  http.begin("http://ip-api.com/json/");
+
+  if (http.GET())
+  {
+    payload = http.getString();
+    Serial.println("Response");
+    Serial.println(payload);
+  } else {
+    Serial.println("Error on request");
+    Locget = false;
+    return false;
+  }
+
+  http.end();
+
+  int n = payload.length();
+
+  // declaring character array
+  char json[n + 1];
+
+  // copying the contents of the
+  // string to char array
+  strcpy(json, payload.c_str());
+
+
+  StaticJsonBuffer<600> jsonBuffer;
+  JsonObject& object = jsonBuffer.parseObject(json);
+  latChr = object["lat"];
+  lonChr = object["lon"];
+  countryChr = object["country"];
+  cityChr = object["city"];
+
+  lat = String(latChr);
+  lon = String(lonChr);
+  country = String(countryChr);
+  city = String(cityChr);
+
+  return true;
+}
+
+void createATTAssets()
+{
+  // Create device assets
+  device.addAsset("temperature", "Temperature", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("pressure", "Pressure", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("humidity", "Humidity", "", "sensor", "{\"type\": \"number\"}");
+  device.addAsset("city", "City", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("country", "Country", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("latitude", "Latitude", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("longitude", "Longitude", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("thermal_zone", "Thermal zone", "", "sensor", "{\"type\": \"string\"}");
+}
+
 void START_XCHIPS(void)
 {
   if ( xCore.ping(0x3C)) {  // if you can ping sensor set ack
@@ -150,15 +374,11 @@ void START_XCHIPS(void)
   } else {        // don't set
     c.SW01_ACK = 0;
   }
-  /* if ( xCore.ping(0x10) && xCore.ping(0x29)) {  // if you can ping sensor set ack
-     c.SL01_ACK = 0xFF;
-     SL01.begin();
-    } else {        // don't set
-     c.SL01_ACK = 0;
-    }*/
+
 }
-void setupWiFi(const char* ssid , const char* password)
+boolean setupWiFi(const char* ssid , const char* password)
 {
+  unsigned int count = 0;
   delay(10);
   Serial.print("Connecting to ");
   Serial.println(ssid);
@@ -173,6 +393,22 @@ void setupWiFi(const char* ssid , const char* password)
   {
     delay(100);
     Serial.print(".");
+    count++;
+
+    if (count > 100)
+    {
+      WiFiconnect = false;
+
+      Serial.println();
+      Serial.println("WiFi not connected");
+
+      if (c.OD01_ACK == 0xFF) {
+        OD01.println("No Wi-Fi!");
+        delay(3000);
+      }
+      count = 0;
+      return false;
+    }
   }
   Serial.println();
   Serial.println("WiFi connected");
@@ -181,149 +417,211 @@ void setupWiFi(const char* ssid , const char* password)
     OD01.println("WiFi Connected");
     delay(3000);
   }
-}
-void loop()
-{
-  Serial.println("lat, lon");
-  
-  Serial.println(lat);
-  Serial.println(lon);
-
-  Serial.println(payload);
-
-  delay(1000);
-  
-  /*unsigned long curTime = millis();
-    if (curTime > (prevTime + 5000))  // Update and send counter value every 5 seconds
-    {
-    // lower TX power may need to check if we are connected
-    // will skip if already connected
-    if(WiFi.status() != WL_CONNECTED) setupWiFi(ssid.c_str(), password.c_str());
-    float tempC, pres, hum;
-    float lux, uva, uvb;
-    float alt, dew, cloudBase;
-    rssi = WiFi.RSSI();
-    if (c.SW01_ACK)
-    {
-      SW01.poll();
-      tempC = SW01.getTempC();
-      pres = SW01.getPressure();
-      hum = SW01.getHumidity();
-      alt = SW01.getQNE();
-      dew = SW01.getDewPoint();
-      cloudBase = ((tempC - dew) / 4.4) * 1000 + alt;
-    } else {
-      tempC = random(100);
-      pres = random(100);
-      hum = random(100);
-      alt = random(100);
-      dew = random(100);
-      cloudBase = random(100);
-    }
-    if (c.SL01_ACK)
-    {
-      SL01.poll();
-      lux = SL01.getLUX();
-      uva = SL01.getUVA();
-      uvb = SL01.getUVB();
-    } else {
-      lux = random(100);
-      uva = random(100);
-      uvb = random(100);
-    }
-    device.send(String(alt), "10");
-    device.send(String(tempC), "1");
-    device.send(String(pres), "2");
-    device.send(String(hum), "3");
-    device.send(String(lux), "4");
-    device.send(String(uva), "5");
-    device.send(String(uvb), "6");
-    device.send(String(rssi), "7");
-    device.send(mac, "8");
-    device.send(String(dew), "11");
-    device.send(String(cloudBase), "12");
-    if (c.OD01_ACK == 0xFF) {
-      OD01.home();
-      OD01.print("Temp.: ");
-      OD01.print(tempC);
-      OD01.println(" C");
-      OD01.print("Press.: ");
-      OD01.print(pres);
-      OD01.println(" Pa");
-      OD01.print("Hum.: ");
-      OD01.print(hum);
-      OD01.println(" %");
-      OD01.print("LUX: ");
-      OD01.print(lux);
-      OD01.println("LUX");
-      OD01.print("UVA: ");
-      OD01.print(uva);
-      OD01.println(" uW/cm^2");
-      OD01.print("UVB: ");
-      OD01.print(uvb);
-      OD01.println(" uW/cm^2");
-    }
-    prevTime = curTime;
-    }
-    device.process();
-    yield(); // this helps with CW01
-    }
-    void callback(char* topic, byte* payload, unsigned int length)
-    {
-    Serial.print("Message arrived [");
-    Serial.print(topic);
-    Serial.print("] ");
-    // Convert payload to json
-    StaticJsonBuffer<500> jsonBuffer;
-    char json[500];
-    for (int i = 0; i < length; i++) {
-    json[i] = (char)payload[i];
-    }
-    json[length] = '\0';
-    JsonObject& root = jsonBuffer.parseObject(json);
-    // Do something
-    if (root.success())
-    {
-    const char* value = root["value"];
-    if (c.OD01_ACK == 0xFF) {
-      OD01.clear();
-      OD01.println(value);
-    }
-    device.send(value, "toggle");  // Send command back as ACK using JSON
-    delay(2000);
-    }
-    else
-    Serial.println("Parsing JSON failed");*/
+  return true;
 }
 
-void getLocation()
+void sendDatatoATT()
 {
-    //Fetch time and approx. location
-  http.begin("http://ip-api.com/json/");
+  device.send(String(tempC), "temperature");
+  device.send(String(pres), "pressure");
+  device.send(String(hum), "humidity");
+  device.send(city, "city");
+  device.send(country, "country");
+  device.send(lat, "latitude");
+  device.send(lon, "longitude");
+  device.send(thermal_zone, "thermal_zone");
+}
 
-  if (http.GET())
+void displayOnOD01()
+{
+  OD01.home();
+  OD01.println("Temp/Hum.");
+  OD01.print(tempC); OD01.print("/"); OD01.println(hum);
+  OD01.println("City/Country");
+  OD01.print(city); OD01.print("/"); OD01.println(country);
+  OD01.println("Thermal zone");
+  OD01.println(thermal_zone);
+}
+
+String onlineZones(float temp, float hum, boolean tz, unsigned int month)
+{
+  String zone;
+  boolean season;
+  month = month % 12;
+
+  if (tz)
   {
-    payload = http.getString();
-    Serial.println("Response");
-    Serial.println(payload);
+    if ((month >= 0) && (month < 6))
+    {
+      season = true;
+    } else {
+      season = false;
+    }
   } else {
-    Serial.println("Error on request");
+    if ((month >= 6) && (month <= 11))
+    {
+      season = true;
+    } else {
+      season = false;
+    }
   }
 
-  http.end();
+  //Winter
+  if (season)
+  {
+    if ((temp >= 20.5) && (temp <= 23.5) && (hum >= 29.3) && (hum <= 58.3))
+    {
+      zone = "comfort zone";
+    }
+    //
+    else if ((temp >= 23.5) && (temp < 24.0) && (hum <= 58.3)) {
+      zone = "comfort zone";
+    } else if ((temp >= 24.0) && (temp < 24.5) && (hum <= 33.3)) {
+      zone = "comfort zone";
+    } else if ((temp >= 24.5) && (hum < 50.0))
+    {
+      zone = "hot and dry zone";
+    } else if ((temp >= 24.5) && (hum >= 50.0))
+    {
+      zone = "hot and humid zone";
+    }
+    //
+    else if ((temp >= 20) && (temp < 20.5) && (hum >= 29.3)) {
+      zone = "comfort zone";
+    } else if ((temp >= 19.5) && (temp < 20) && (hum >= 33.3)) {
+      zone = "comfort zone";
+    } else if ((temp < 19.5) && (hum < 50.0))
+    {
+      zone = "cold and dry zone";
+    } else if ((temp < 19.5) && (hum >= 50.0))
+    {
+      zone = "cold and humid zone";
+    }
+  }
+  //Summer
+  else {
+    if ((temp >= 23.5) && (temp <= 26.0) && (hum >= 24.3) && (hum <= 57.3))
+    {
+      zone = "comfort zone";
+    }
+    //
+    else if ((temp >= 26.0) && (temp < 26.5) && (hum <= 57.3)) {
+      zone = "comfort zone";
+    } else if ((temp >= 26.5) && (temp < 27.0) && (hum <= 42.3)) {
+      zone = "comfort zone";
+    } else if ((temp >= 27.0) && (hum < 50.0))
+    {
+      zone = "hot and dry zone";
+    } else if ((temp >= 27.0) && (hum >= 50.0))
+    {
+      zone = "hot and humid zone";
+    }
+    //
+    else if ((temp >= 22.5) && (temp < 23.0) && (hum >= 51.95)) {
+      zone = "comfort zone";
+    } else if ((temp >= 23.0) && (temp < 23.5) && (hum >= 24.4)) {
+      zone = "comfort zone";
+    } else if ((temp < 22.5) && (hum < 50.0))
+    {
+      zone = "cold and dry zone";
+    } else if ((temp < 22.5) && (hum >= 50.0))
+    {
+      zone = "cold and humid zone";
+    }
+  }
 
-    int n = payload.length(); 
-  
-    // declaring character array 
-    char json[n + 1]; 
-  
-    // copying the contents of the 
-    // string to char array 
-    strcpy(json, payload.c_str()); 
-  
+  return zone;
 
-  StaticJsonBuffer<500> jsonBuffer;
-  JsonObject& object = jsonBuffer.parseObject(json);
-  lat = object["lat"];
-  lon = object["lon"];
+}
+
+String offlineZones(float temp, float hum)
+{
+  String zone;
+  //Full comfort zone range
+  if ((temp >= 24.5) && (temp <= 26))
+  {
+    zone = "comfort zone";
+  }
+  //Comfort zones for temp > 26
+  else if ((temp > 26) && (temp <= 26.5) && (hum <= 100.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 26.5) && (temp <= 27) && (hum <= 90.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 27) && (temp <= 27.25) && (hum <= 80.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 27.25) && (temp <= 27.5) && (hum <= 70.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 27.5) && (temp <= 28) && (hum <= 60.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 28) && (temp <= 28.5) && (hum <= 50.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 28.5) && (temp <= 29) && (hum <= 40.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 29) && (temp <= 29.5) && (hum <= 30.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 29.5) && (temp <= 30.0) && (hum <= 20.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 30.0) && (temp <= 30.5) && (hum <= 10.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp > 30.5) && (hum <= 50.0))
+  {
+    zone = "hot and dry zone";
+  } else if ((temp > 30.5) && (hum > 50.0))
+  {
+    zone = "hot and humid zone";
+  }
+
+  //Comfort Zones for temp < 24.5
+  else if ((temp >= 24.0) && (temp < 24.5) && (hum >= 10.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp >= 23.5) && (temp < 24) && (hum >= 20.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp >= 23.0) && (temp < 23.5) && (hum >= 30.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp >= 22.75) && (temp < 23.0) && (hum >= 40.0))
+  {
+    zone = "comfort zone";
+  }  else if ((temp >= 22.5) && (temp < 22.75) && (hum >= 50.0))
+  {
+    zone = "comfort zone";
+  }  else if ((temp >= 22.0) && (temp < 22.5) && (hum >= 60.0))
+  {
+    zone = "comfort zone";
+  }  else if ((temp >= 21.75) && (temp < 22.0) && (hum >= 70.0))
+  {
+    zone = "comfort zone";
+  }
+  else if ((temp >= 21.5) && (temp < 21.75) && (hum >= 80.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp >= 21.25) && (temp < 21.5) && (hum >= 90.0))
+  {
+    zone = "comfort zone";
+  } else if ((temp >= 21.0) && (temp < 21.25) && (hum >= 95.0))
+  {
+    zone = "comfort zone";
+  }
+  else if ((temp < 21.0) && (hum <= 50.0 ))
+  {
+    zone = "cold and dry zone";
+  }
+  else if ((temp < 21.0) && (hum > 50.0 ))
+  {
+    zone = "cold and humid zone";
+  }
+
+  return zone;
 }
