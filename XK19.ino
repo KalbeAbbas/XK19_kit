@@ -41,6 +41,7 @@ String city;
 String Date;
 String Time;
 String thermal_zone;
+String IP;
 
 unsigned long prevTime;
 unsigned int prevVal = 0;
@@ -48,6 +49,8 @@ unsigned int prevVal = 0;
 float tempC, pres, hum;
 float dew, alt, cloudBase;
 long rssi;
+
+bool relay = false;
 
 // Callback functions MQTT
 void callback(char* topic, byte* payload, unsigned int length);
@@ -67,8 +70,6 @@ xOC03 OC03;
 
 void setup()
 {
-  Serial.begin(115200);  // Init serial link for debugging
-
   // Start the I2C Comunication
   Wire.begin(); // no need to input pins included in board file
 
@@ -77,7 +78,7 @@ void setup()
 
   if (c.OD01_ACK == 0xFF)
   {
-    OD01.println("Provisioning your device...");
+    OD01.println("Provisioning XK19...");
   }
 
   prv.begin();
@@ -167,6 +168,8 @@ void loop()
   //Wi-Fi signal strength
   rssi = WiFi.RSSI();
 
+  device.process();
+
   //Get SW01 measures
   if (c.SW01_ACK)
   {
@@ -186,6 +189,8 @@ void loop()
     cloudBase = random(100);
   }
 
+  device.process();
+
   //Get thermal zone
   if (Dateget && Locget)
   {
@@ -194,12 +199,16 @@ void loop()
     thermal_zone = offlineZones(tempC, hum);
   }
 
-  if (c.OC03_ACK == 0xFF)
+  //Activate/deactivate OC03 based on thermal zone
+  if (!relay)
   {
-    if (thermal_zone != "comfort zone") {
-      OC03.write(HIGH);
-    } else if (thermal_zone == "comfort zone") {
-      OC03.write(LOW);
+    if (c.OC03_ACK == 0xFF)
+    {
+      if (thermal_zone != "comfort zone") {
+        OC03.write(HIGH);
+      } else if (thermal_zone == "comfort zone") {
+        OC03.write(LOW);
+      }
     }
   }
 
@@ -214,7 +223,7 @@ void loop()
     getLocation();
 
     //Get Date and time
-    getDateTime();
+    //getDateTime();
 
     Month = (Date.substring(5, 7)).toInt();
 
@@ -234,7 +243,7 @@ void loop()
     }
     prevTime = curTime;
   }
-  device.process();
+
 }
 
 
@@ -250,31 +259,60 @@ void loop()
 
 
 void callback(char* topic, byte* payload, unsigned int length)
-{ 
+{
+  String OD01Topic;
+  String RelayTopic;
+  String value2;
+  int value3;
+  String strTopic;
+
+  OD01Topic = "device/" + DEVICE_ID + "/asset/7/command";
+  RelayTopic = "device/" + DEVICE_ID + "/asset/1/command";
+
   Serial.print("Message arrived [");
-  Serial.print(topic);
+  Serial.print(String(topic));
   Serial.print("] ");
+
   // Convert payload to json
   StaticJsonBuffer<500> jsonBuffer;
   char json[500];
   for (int i = 0; i < length; i++) {
     json[i] = (char)payload[i];
   }
+
   json[length] = '\0';
   JsonObject& root = jsonBuffer.parseObject(json);
   // Do something
   if (root.success())
   {
     const char* value = root["value"];
-    if (c.OD01_ACK == 0xFF) {
-      OD01.clear();
-      OD01.println(value);
+    value2 = String(value);
+
+    if (String(topic) == OD01Topic)
+    {
+      if (c.OD01_ACK == 0xFF) {
+        OD01.clear();
+        OD01.println(value);
+      }
+      delay(2000);
+    } else if (String(topic) == RelayTopic)
+    {
+      if (c.OC03_ACK == 0xFF)
+      {
+        if (value2 == "true") {
+          relay = true;
+          OC03.write(HIGH);
+        } else {
+          relay = false;
+          OC03.write(LOW);
+        }
+      }
+      device.send(value2, "oc03_status");
     }
-    device.send(value, "toggle");  // Send command back as ACK using JSON
-    delay(2000);
   }
-  else
+  else {
     Serial.println("Parsing JSON failed");
+  }
 }
 
 boolean getDateTime()
@@ -291,12 +329,13 @@ boolean getDateTime()
     payload = http.getString();
     Serial.println("Response");
     Serial.println(payload);
+    http.end();
   } else {
     Serial.println("Error on request");
     Dateget = false;
+    http.end();
+    return false;
   }
-
-  http.end();
 
   int n = payload.length();
 
@@ -322,50 +361,71 @@ boolean getDateTime()
 
 boolean getLocation()
 {
-  String payload;
-  const char * latChr;
-  const char * lonChr;
-  const char * countryChr;
-  const char * cityChr;
+  const char * hostDomain = "ip-api.com";
+  const int hostPort = 80;
 
+  const char* latitude;
+  const char* longitude;
+  const char* City;
+  const char* Country;
 
-  //Fetch time and approx. location
-  http.begin("http://ip-api.com/json/");
+  String out;
+  String line;
 
-  if (http.GET())
+  // Use WiFiClient class to create TCP connections
+  if (!espClient.connect(hostDomain, hostPort))
   {
-    payload = http.getString();
-    Serial.println("Response");
-    Serial.println(payload);
-  } else {
-    Serial.println("Error on request");
-    Locget = false;
+    Serial.println("connection failed");
     return false;
   }
+  Serial.println("Connected!");
 
-  http.end();
+  // This will send the request to the server
+  espClient.print((String)"GET /json/ HTTP/1.1\r\n" +
+                  "Host: " + String("CW02") + "\r\n" +
+                  "Connection: close\r\n\r\n");
+  unsigned long timeout = millis();
+  while (espClient.available() == 0)
+  {
+    if (millis() - timeout > 5000)
+    {
+      Serial.println(">>> Client Timeout !");
+      espClient.stop();
+      return false;
+    }
+  }
 
-  int n = payload.length();
+  // Read all the lines of the reply from server and print them to Serial
+  while (espClient.available())
+  {
+    line = espClient.readStringUntil('\r');
+  }
 
-  // declaring character array
-  char json[n + 1];
+  out = line.substring(line.indexOf("{"));
 
-  // copying the contents of the
-  // string to char array
-  strcpy(json, payload.c_str());
-
+  Serial.println(out);
 
   StaticJsonBuffer<600> jsonBuffer;
-  JsonObject& object = jsonBuffer.parseObject(json);
-  latChr = object["lat"];
-  lonChr = object["lon"];
-  countryChr = object["country"];
-  cityChr = object["city"];
+  JsonObject& object = jsonBuffer.parseObject(line);
 
-  lat = String(latChr);
-  lon = String(lonChr);
-  country = String(countryChr);
-  city = String(cityChr);
+
+
+  latitude = object["lat"];
+  longitude = object["lon"];
+  Country = object["country"];
+  City = object["city"];
+
+  lat = String(latitude);
+  lon= String(longitude);
+  country = String(Country);
+  city= String(City);
+
+  Serial.println(lat);
+  Serial.println(lon);
+  Serial.println(country);
+  Serial.println(city);
+  
+  espClient.stop();
 
   return true;
 }
@@ -388,6 +448,7 @@ void createATTAssets()
   device.addAsset("latitude", "Latitude", "", "sensor", "{\"type\": \"string\"}");
   device.addAsset("longitude", "Longitude", "", "sensor", "{\"type\": \"string\"}");
   device.addAsset("thermal_zone", "Thermal zone", "", "sensor", "{\"type\": \"string\"}");
+  device.addAsset("oc03_status", "OC03 Status", "", "sensor", "{\"type\": \"boolean\"}");
 }
 
 void START_XCHIPS(void)
@@ -412,6 +473,7 @@ void START_XCHIPS(void)
   if ( xCore.ping(0x38)) {  // if you can ping sensor set ack
     c.OC03_ACK = 0xFF;
     OC03.begin();
+    OC03.write(LOW);
   } else {        // don't set
     c.OC03_ACK = 0;
   }
@@ -470,6 +532,7 @@ void sendDatatoATT()
   device.send(String(rssi), "5");
   device.send(mac, "6");
   device.send(String(dew), "8");
+  device.process();
   device.send(String(cloudBase), "10");
   device.send(city, "city");
   device.send(country, "country");
